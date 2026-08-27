@@ -1,0 +1,8 @@
+{
+  "name": "2Remix KRA Dyno Test \u0026 Quality Certificate System",
+  "description": "PT Komatsu Remanufacturing Asia (KRA) Quality Control Dyno Test Bench application for test record input, automatic PASS/FAIL evaluation, digital approval workflow, and Product Quality Test Certificate PDF generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
