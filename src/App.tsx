@@ -11,7 +11,7 @@ import { CertificateView } from './components/CertificateView';
 import { SupervisorApprovalModal } from './components/SupervisorApprovalModal';
 import { AccessDenied } from './components/AccessDenied';
 import { LoginPage } from './components/LoginPage';
-import { GoogleDriveArchive } from './components/GoogleDriveArchive';
+import { DatabaseBackupArchive } from './components/DatabaseBackupArchive';
 import { TestRecord } from './types';
 
 const AppContent: React.FC = () => {
@@ -202,8 +202,8 @@ const AppContent: React.FC = () => {
             )
           )}
 
-          {/* VIEW: GOOGLE DRIVE CLOUD ARCHIVE (ALL AUTHENTICATED ROLES) */}
-          {currentView === 'google_drive' && <GoogleDriveArchive />}
+          {/* VIEW: DATABASE BACKUP & RESTORE ARCHIVE */}
+          {currentView === 'database_backup' && <DatabaseBackupArchive />}
         </main>
       </div>
 

@@ -15,20 +15,18 @@ import {
 import { useApp } from '../context/AppContext';
 import { UserRole } from '../types';
 import { KomatsuLogo } from './KomatsuLogo';
-import { googleSignIn } from '../services/googleAuth';
 
 interface LoginPageProps {
   onLoginSuccess?: () => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
-  const { login, users, setCurrentUser } = useApp();
+  const { login, users } = useApp();
   const [usernameOrNik, setUsernameOrNik] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,38 +57,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         setErrorMsg(result.message || 'Authentication failed. Please verify your credentials.');
       }
     }, 200);
-  };
-
-  const handleGoogleSignIn = async () => {
-    setErrorMsg(null);
-    setIsGoogleLoading(true);
-    try {
-      const authResult = await googleSignIn();
-      if (authResult?.user) {
-        const userEmail = authResult.user.email?.toLowerCase();
-        // Check if user is mapped in system users
-        const matched = users.find(
-          (u) => (u.email && u.email.toLowerCase() === userEmail) || (u.name.toLowerCase() === (authResult.user.displayName || '').toLowerCase())
-        );
-
-        if (matched) {
-          setCurrentUser(matched);
-        } else {
-          // Default to first admin or supervisor user session
-          const fallbackUser = users[0];
-          setCurrentUser(fallbackUser);
-        }
-
-        if (onLoginSuccess) {
-          onLoginSuccess();
-        }
-      }
-    } catch (err: any) {
-      console.error('Google Sign-In failed:', err);
-      setErrorMsg(err.message || 'Google sign-in failed. Please try again.');
-    } finally {
-      setIsGoogleLoading(false);
-    }
   };
 
   // Demo autofill helper for ease of reviewer evaluation
@@ -245,7 +211,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
               <button
                 id="btn-login-submit"
                 type="submit"
-                disabled={isLoading || isGoogleLoading}
+                disabled={isLoading}
                 className="w-full py-3 px-4 bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-slate-950 font-black text-sm rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
               >
                 {isLoading ? (
@@ -256,42 +222,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
-              </button>
-
-              {/* Divider */}
-              <div className="relative flex py-1 items-center">
-                <div className="flex-grow border-t border-slate-800"></div>
-                <span className="flex-shrink mx-3 text-[11px] text-slate-500 uppercase tracking-wider font-semibold">Or</span>
-                <div className="flex-grow border-t border-slate-800"></div>
-              </div>
-
-              {/* Google Sign-In with minimal identity scopes */}
-              <button
-                id="btn-login-google"
-                type="button"
-                onClick={handleGoogleSignIn}
-                disabled={isLoading || isGoogleLoading}
-                className="w-full py-2.5 px-4 bg-slate-950 hover:bg-slate-800 active:scale-[0.99] text-slate-200 border border-slate-700 font-bold text-xs rounded-xl transition-all flex items-center justify-center gap-2.5 disabled:opacity-50 cursor-pointer"
-              >
-                <svg className="w-4 h-4 shrink-0" viewBox="0 0 48 48">
-                  <path
-                    fill="#EA4335"
-                    d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                  />
-                  <path
-                    fill="#4285F4"
-                    d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                  />
-                </svg>
-                <span>{isGoogleLoading ? 'Connecting Google...' : 'Sign in with Google Account'}</span>
               </button>
             </form>
           </div>

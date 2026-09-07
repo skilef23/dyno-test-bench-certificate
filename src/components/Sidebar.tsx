@@ -20,7 +20,7 @@ export type NavView =
   | 'master_products'
   | 'users'
   | 'audit_trail'
-  | 'google_drive';
+  | 'database_backup';
 
 interface SidebarProps {
   currentView: NavView;
@@ -123,11 +123,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onNavigate }) => 
 
         {/* 4. Database Backup & Archive (All Roles) */}
         <button
-           id="nav-google-drive"
+           id="nav-database-backup"
            type="button"
-           onClick={() => onNavigate('google_drive')}
+           onClick={() => onNavigate('database_backup')}
            className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-             currentView === 'google_drive'
+             currentView === 'database_backup'
                ? 'bg-amber-500 text-slate-950 font-bold'
                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
            }`}

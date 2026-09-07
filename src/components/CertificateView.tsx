@@ -18,7 +18,7 @@ import {
 import { TestRecord } from '../types';
 import { PerformanceChart } from './PerformanceChart';
 import { downloadCertificatePDF } from '../utils/pdfGenerator';
-import { downloadDynoRecordJSON } from '../services/googleDrive';
+import { downloadDynoRecordJSON } from '../services/backupService';
 import confetti from 'canvas-confetti';
 import { KomatsuLogo } from './KomatsuLogo';
 
