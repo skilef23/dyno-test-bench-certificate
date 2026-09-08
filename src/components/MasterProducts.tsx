@@ -315,7 +315,7 @@ export const MasterProducts: React.FC = () => {
     const param = formParameters[index];
     setEditingParamIndex(index);
     setParamName(param.name);
-    setParamCategory(param.category || 'PERFORMANCE');
+    setParamCategory((param.category || 'PERFORMANCE') as ParameterCategory);
     setParamDesc(param.description || '');
     setParamSpecType(param.specType);
     setParamSpecText(param.specText);

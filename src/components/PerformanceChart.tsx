@@ -22,7 +22,7 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
   results = [],
   performanceData,
   samplingPoints: propSamplingPoints,
-  jisFactor = 1.0,
+  jisFactor,
   ratedPowerResult,
   ratedTorqueResult,
   modelName = 'Engine Performance',
@@ -46,6 +46,7 @@ export const PerformanceChart: React.FC<PerformanceChartProps> = ({
 
   // Calculate sampling points
   const samplingPoints = useMemo<PerformanceSamplingPoint[]>(() => {
+    if (!Number.isFinite(jisFactor) || jisFactor! <= 0) return [];
     if (propSamplingPoints && propSamplingPoints.length > 0) {
       return propSamplingPoints;
     }

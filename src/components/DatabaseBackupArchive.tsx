@@ -38,6 +38,7 @@ interface BackupRecordItem {
 }
 
 export const DatabaseBackupArchive: React.FC = () => {
+  const app = useApp();
   const {
     testRecords,
     products,
@@ -46,10 +47,9 @@ export const DatabaseBackupArchive: React.FC = () => {
     testBenches,
     logAudit,
     addAuditEvent,
-    setTestRecords,
     setProducts,
     setUsers,
-  } = useApp();
+  } = app;
 
   const [isProcessingBackup, setIsProcessingBackup] = useState(false);
   const [backupStepMessage, setBackupStepMessage] = useState<string>('');
@@ -237,8 +237,11 @@ export const DatabaseBackupArchive: React.FC = () => {
 
     try {
       const { payload } = restoreConfirmItem;
+      if (!('setTestRecords' in app) || typeof app.setTestRecords !== 'function') {
+        throw new Error('Restore is unavailable in this version. No active data was changed. Complete the backup/restore implementation before importing a backup.');
+      }
       if (Array.isArray(payload.dynoTestRecords)) {
-        setTestRecords(payload.dynoTestRecords);
+        app.setTestRecords(payload.dynoTestRecords);
       }
       if (Array.isArray(payload.masterProducts)) {
         setProducts(payload.masterProducts);

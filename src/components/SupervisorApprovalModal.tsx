@@ -1,3 +1,5 @@
+import { approvalErrors } from '../utils/testWorkflow';
+import { calculateOverallResults } from '../utils/evaluation';
 import React, { useState } from 'react';
 import {
   CheckCircle2,
@@ -64,7 +66,8 @@ export const SupervisorApprovalModal: React.FC<SupervisorApprovalModalProps> = (
     );
   }
 
-  const isPass = record.overallResult === 'PASS';
+  const isPass = calculateOverallResults(record.results).overallResult === 'PASS';
+  const approvalBlockers = approvalErrors(record, currentUser, supervisorSignature);
   const failedParams = record.results.filter((r) => r.status === 'FAIL');
 
   const isSelfApproval =
@@ -74,6 +77,7 @@ export const SupervisorApprovalModal: React.FC<SupervisorApprovalModalProps> = (
       record.testerName.trim().toLowerCase() === currentUser.name.trim().toLowerCase());
 
   const handleApprove = () => {
+    if (approvalBlockers.length) {setErrorMessage(approvalBlockers.join('\n')); return;}
     if (isSelfApproval) {
       setErrorMessage(
         'Self-approval is not allowed. The approval must be performed by a different authorized Supervisor.'
@@ -314,7 +318,7 @@ export const SupervisorApprovalModal: React.FC<SupervisorApprovalModalProps> = (
                           <td className="py-2 px-3 text-slate-700">{item.specText}</td>
                           <td className="py-2 px-3 text-center text-slate-600">{item.unit}</td>
                           <td className="py-2 px-3 font-mono">
-                            {item.hasRhLh ? (
+                            {item.bankConfig === 'RH_LH' ? (
                               <span>
                                 RH: <strong>{item.actualRh ?? '-'}</strong> | LH: <strong>{item.actualLh ?? '-'}</strong>
                               </span>
@@ -474,6 +478,11 @@ export const SupervisorApprovalModal: React.FC<SupervisorApprovalModalProps> = (
           )}
         </div>
 
+        {approvalBlockers.length > 0 && (
+          <div role="alert" className="px-5 py-2 text-xs text-amber-900 bg-amber-50 whitespace-pre-line">
+            Approval blocked: {approvalBlockers.join('\n')}
+          </div>
+        )}
         {/* Footer Actions */}
         <div className="bg-slate-50 border-t border-slate-200 px-5 py-3 flex items-center justify-between">
           <button
@@ -499,7 +508,7 @@ export const SupervisorApprovalModal: React.FC<SupervisorApprovalModalProps> = (
                 id="btn-confirm-approve"
                 type="button"
                 onClick={handleApprove}
-                disabled={isProcessing || isSelfApproval}
+                disabled={isProcessing || approvalBlockers.length > 0}
                 title={
                   isSelfApproval
                     ? 'Self-approval is forbidden. Another supervisor must approve.'

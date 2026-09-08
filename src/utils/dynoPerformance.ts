@@ -56,7 +56,8 @@ export function calculateJISCorrection(
   rawTorque: number,
   jisFactor: number
 ): { correctedPower: number; correctedTorque: number } {
-  const factor = isNaN(jisFactor) || jisFactor <= 0 ? 1.0 : jisFactor;
+  if (!Number.isFinite(jisFactor) || jisFactor <= 0) throw new Error('JIS factor must be a finite number greater than zero.');
+  const factor = jisFactor;
   const correctedPower = Math.round(rawPower * factor * 10) / 10;
   const correctedTorque = Math.round(rawTorque * factor * 10) / 10;
   return { correctedPower, correctedTorque };
@@ -122,13 +123,13 @@ export function validateDynProDataset(data: DynProDataPoint[]): {
       };
     }
 
-    const operatingMode = pt.operatingMode || classifyOperatingMode(pt.rawPower, pt.rawTorque);
+    const operatingMode = classifyOperatingMode(pt.rawPower, pt.rawTorque);
 
     validData.push({
       lineNumber: pt.lineNumber || i + 1,
-      rpm: Math.round(pt.rpm),
-      rawPower: Math.round(pt.rawPower * 10) / 10,
-      rawTorque: Math.round(pt.rawTorque * 10) / 10,
+      rpm: pt.rpm,
+      rawPower: pt.rawPower,
+      rawTorque: pt.rawTorque,
       operatingMode,
       correctedPower: pt.correctedPower !== undefined ? Math.round(pt.correctedPower * 10) / 10 : undefined,
       correctedTorque: pt.correctedTorque !== undefined ? Math.round(pt.correctedTorque * 10) / 10 : undefined,
@@ -137,7 +138,7 @@ export function validateDynProDataset(data: DynProDataPoint[]): {
 
   const loadPoints = validData.filter((p) => p.operatingMode === 'LOAD');
 
-  if (loadPoints.length < 3) {
+  if (new Set(loadPoints.map(point => point.rpm)).size < 3) {
     return {
       isValid: false,
       error: 'INSUFFICIENT PERFORMANCE DATA: At least 3 distinct LOAD operating points required.',
@@ -274,6 +275,7 @@ export function findNearestRatedPoint(
   }
 
   const validation = validateDynProDataset(data);
+  if (!validation.isValid) return null;
   const searchPool = validation.validData.filter((p) => p.operatingMode === 'LOAD');
 
   if (searchPool.length === 0) {
@@ -301,9 +303,9 @@ export function findNearestRatedPoint(
     targetRpm,
     actualRpm: closestPoint.rpm,
     rawHp: closestPoint.rawPower,
-    correctedHp: closestPoint.correctedPower !== undefined ? closestPoint.correctedPower : correctedPower,
+    correctedHp: correctedPower,
     rawTorque: closestPoint.rawTorque,
-    correctedTorque: closestPoint.correctedTorque !== undefined ? closestPoint.correctedTorque : correctedTorque,
+    correctedTorque: correctedTorque,
     differenceRpm: closestPoint.rpm - targetRpm,
   };
 }
@@ -444,185 +446,82 @@ export function generateSampleDynProData(modelName?: string): DynProDataPoint[] 
  */
 export function extractDataPointsFromText(text: string): DynProDataPoint[] {
   const points: DynProDataPoint[] = [];
-  const lines = text.split(/\r?\n/);
-  let autoLineNum = 1;
-
-  for (const line of lines) {
+  for (const [index, line] of text.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    // Ignore header rows that contain non-numeric titles
-    if (/line|engspd|eng_spd|eng_power|eng_torque|speed|power|torque|rpm|hp|kgm/i.test(trimmed) && !/\d{3,4}/.test(trimmed)) {
-      continue;
+    if (!trimmed || !/^[+\-\d.]/.test(trimmed)) continue;
+    const tokens = trimmed.split(/[,;\t ]+/).filter(Boolean);
+    // Accept only the documented RPM/Power/Torque schema, optionally prefixed by logger row number.
+    // Never search arbitrary numbers in a report and silently guess the column mapping.
+    if (![3, 4].includes(tokens.length) || tokens.some(token => !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(token))) {
+      throw new Error(`Unsupported or invalid data at text line ${index + 1}. Expected [LineNumber] RPM Power Torque. No data was imported.`);
     }
-
-    // Split by commas, tabs, or whitespace
-    const tokens = trimmed.replace(/[,;]/g, ' ').split(/\s+/).filter(Boolean);
-    const nums = tokens.map((t) => parseFloat(t)).filter((n) => !isNaN(n));
-
-    if (nums.length >= 3) {
-      let lineNum = autoLineNum;
-      let rpm: number | undefined;
-      let rawPower: number | undefined;
-      let rawTorque: number | undefined;
-
-      // Pattern A: LineNumber EngSpd Eng_Power Eng_Torque (e.g. "1 648 0 0" or "23 1373 908 491")
-      if (nums.length >= 4 && nums[0] >= 1 && nums[0] <= 500 && Number.isInteger(nums[0]) && nums[1] >= 400 && nums[1] <= 3500) {
-        lineNum = Math.round(nums[0]);
-        rpm = Math.round(nums[1]);
-        rawPower = nums[2];
-        rawTorque = nums[3];
-      }
-      // Pattern B: EngSpd Eng_Power Eng_Torque (e.g. "1373 908 491")
-      else if (nums[0] >= 400 && nums[0] <= 3500 && nums[1] >= 0 && nums[2] >= 0) {
-        rpm = Math.round(nums[0]);
-        rawPower = nums[1];
-        rawTorque = nums[2];
-      } else {
-        // Search for RPM within the numbers
-        const foundRpmIndex = nums.findIndex((n) => n >= 400 && n <= 3500 && Number.isInteger(n));
-        if (foundRpmIndex !== -1 && nums.length > foundRpmIndex + 2) {
-          if (foundRpmIndex > 0 && nums[0] >= 1 && nums[0] <= 500) {
-            lineNum = Math.round(nums[0]);
-          }
-          rpm = Math.round(nums[foundRpmIndex]);
-          rawPower = nums[foundRpmIndex + 1];
-          rawTorque = nums[foundRpmIndex + 2];
-        }
-      }
-
-      if (rpm !== undefined && rawPower !== undefined && rawTorque !== undefined) {
-        if (rawPower >= 0 && rawTorque >= 0 && rawPower <= 5000 && rawTorque <= 2500) {
-          const operatingMode = classifyOperatingMode(rawPower, rawTorque);
-          points.push({
-            lineNumber: lineNum,
-            rpm,
-            rawPower: Math.round(rawPower * 10) / 10,
-            rawTorque: Math.round(rawTorque * 10) / 10,
-            operatingMode,
-          });
-          autoLineNum++;
-        }
-      }
+    const values = tokens.map(Number);
+    const [rpm, rawPower, rawTorque] = values.slice(-3);
+    const lineNumber = values.length === 4 ? values[0] : index + 1;
+    if (!Number.isInteger(lineNumber) || lineNumber < 1 || values.some(value => !Number.isFinite(value))) {
+      throw new Error(`Invalid numeric data at text line ${index + 1}.`);
     }
+    points.push({lineNumber, rpm, rawPower, rawTorque, operatingMode: classifyOperatingMode(rawPower, rawTorque)});
   }
-
   return points;
 }
 
-/**
- * Parses uploaded DynPro PDF or text/CSV file and extracts ALL structured logger rows.
- * Retains all 41+ logger points across all pages.
- */
-export async function parseDynProFile(
-  file: File,
-  modelName?: string
-): Promise<{
+/** Import actual measurements only. Unreadable or unsupported files must fail closed. */
+export async function parseDynProFile(file: File, _modelName?: string): Promise<{
   data: DynProDataPoint[];
   fileInfo: DynProFileInfo;
   extractedTextPreview?: string;
-  source: 'pdf_extracted' | 'csv_parsed' | 'text_parsed' | 'simulated_fallback';
+  source: 'pdf_extracted' | 'text_parsed';
 }> {
-  // Convert file to base64 DataURL for permanent retention
-  const fileData = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = (e) => reject(e);
-    reader.readAsDataURL(file);
-  });
-
-  const fileInfo: DynProFileInfo = {
-    fileName: file.name,
-    fileSize: file.size,
-    fileType: file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'text/plain'),
-    uploadedAt: new Date().toISOString(),
-    fileData,
-  };
-
-  try {
-    if (file.name.toLowerCase().endsWith('.pdf') || file.type.includes('pdf')) {
+  const isPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
+  if (!isPdf && !/\.(csv|txt)$/i.test(file.name)) throw new Error('Supported files: PDF, CSV, or TXT.');
+  if (!file.size) throw new Error('The uploaded file is empty.');
+  let fullText = '';
+  if (isPdf) {
+    try {
+      const pdfjs = await import('pdfjs-dist');
+      const worker = await import('pdfjs-dist/build/pdf.worker.min.mjs?url');
+      pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
+      const loadingTask = pdfjs.getDocument({data: await file.arrayBuffer()});
       try {
-        const pdfjs = await import('pdfjs-dist');
-        const arrayBuffer = await file.arrayBuffer();
-
-        if (!pdfjs.GlobalWorkerOptions.workerSrc) {
-          pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
-        }
-
-        const loadingTask = pdfjs.getDocument({ data: arrayBuffer });
         const pdfDoc = await loadingTask.promise;
-        let fullText = '';
-
         for (let i = 1; i <= pdfDoc.numPages; i++) {
           const page = await pdfDoc.getPage(i);
           const textContent = await page.getTextContent();
-
-          // Reconstruct lines by Y-coordinate grouping to ensure structured tabular row reading
-          const itemsByY = new Map<number, { x: number; str: string }[]>();
-
-          for (const item of textContent.items as any[]) {
-            if (!item.str || !item.transform) continue;
-            // Round Y coordinate to 3 pixels tolerance to group same line items
+          const itemsByY = new Map<number, {x: number; str: string}[]>();
+          for (const item of textContent.items) {
+            if (!('str' in item) || !item.str) continue;
             const y = Math.round(item.transform[5] / 3) * 3;
-            if (!itemsByY.has(y)) {
-              itemsByY.set(y, []);
-            }
-            itemsByY.get(y)!.push({ x: item.transform[4], str: item.str });
+            if (!itemsByY.has(y)) itemsByY.set(y, []);
+            itemsByY.get(y)!.push({x: item.transform[4], str: item.str});
           }
-
-          // Sort Y descending (top of page to bottom)
-          const sortedYs = Array.from(itemsByY.keys()).sort((a, b) => b - a);
-
-          for (const y of sortedYs) {
-            const lineItems = itemsByY.get(y)!.sort((a, b) => a.x - b.x);
-            const lineText = lineItems.map((it) => it.str).join(' ');
-            fullText += `${lineText}\n`;
+          for (const y of [...itemsByY.keys()].sort((a, b) => b - a)) {
+            fullText += itemsByY.get(y)!.sort((a, b) => a.x - b.x).map(item => item.str).join(' ') + '\n';
           }
         }
-
-        const points = extractDataPointsFromText(fullText);
-        const validation = validateDynProDataset(points);
-        if (validation.isValid && validation.validData.length >= 3) {
-          return {
-            data: validation.validData,
-            fileInfo,
-            extractedTextPreview: fullText.slice(0, 500),
-            source: 'pdf_extracted',
-          };
-        }
-      } catch (pdfErr) {
-        console.warn('PDF.js text parse warning, trying direct text parse:', pdfErr);
+      } finally {
+        await loadingTask.destroy();
       }
+    } catch {
+      throw new Error('Unable to read this PDF. Upload a text-based DynPro PDF or export RPM/Power/Torque as CSV/TXT. No replacement data was generated.');
     }
-
-    // Attempt direct text / CSV parse
-    const textContent = await file.text();
-    const parsedPoints = extractDataPointsFromText(textContent);
-    const textValidation = validateDynProDataset(parsedPoints);
-    if (textValidation.isValid && textValidation.validData.length >= 3) {
-      return {
-        data: textValidation.validData,
-        fileInfo,
-        extractedTextPreview: textContent.slice(0, 500),
-        source: 'text_parsed',
-      };
-    }
-
-    // Fallback: calibrated standard 41-row logger dataset
-    const sample = generateSampleDynProData(modelName);
-    return {
-      data: sample,
-      fileInfo,
-      extractedTextPreview: `Taylor Dynamometer Report: ${file.name} parsed into 41 logger points.`,
-      source: 'simulated_fallback',
-    };
-  } catch (err) {
-    console.error('Error in parseDynProFile:', err);
-    const sample = generateSampleDynProData(modelName);
-    return {
-      data: sample,
-      fileInfo,
-      source: 'simulated_fallback',
-    };
+    if (!fullText.trim()) throw new Error('This PDF has no readable text. Scanned PDFs require OCR outside this import. No data was imported.');
+  } else {
+    fullText = await file.text();
   }
+  const data = extractDataPointsFromText(fullText);
+  const validation = validateDynProDataset(data);
+  if (!validation.isValid) throw new Error(validation.error || 'No valid DynPro measurements found.');
+  const fileData = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Unable to retain the original uploaded file.'));
+    reader.readAsDataURL(file);
+  });
+  return {
+    data: validation.validData,
+    fileInfo: {fileName: file.name, fileSize: file.size, fileType: file.type, uploadedAt: new Date().toISOString(), source: isPdf ? 'PDF' : 'TEXT', importedRows: validation.validData.length, fileData},
+    extractedTextPreview: fullText.slice(0, 500),
+    source: isPdf ? 'pdf_extracted' : 'text_parsed',
+  };
 }

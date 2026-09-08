@@ -1,35 +1,64 @@
 # KRA Dyno Test & Quality Certificate System
 
-Development web application for dyno test records, automatic PASS/FAIL evaluation, supervisor approval, performance charts, and product quality certificate PDF generation.
+React/Vite application for test records, parameter evaluation, supervisor review, performance graphs and A4 test reports/certificates.
 
-## Data architecture
+## Current implementation
 
-- Cloud Firestore is the shared multi-computer data source.
-- Firebase Anonymous Authentication protects the development Firestore workspace from unauthenticated access.
-- Browser local storage remains an immediate cache and offline fallback.
-- Full JSON download and restore provide an independent recovery copy.
+This revision addresses test validation, actual DynPro imports, approval locks and certificate wording. It does **not** implement production authentication, shared cloud persistence or full backup restoration.
 
-## Firebase setup before publishing
+- Data currently lives in React state and browser localStorage. The included Firebase configuration and development rules do not constitute a working cloud integration.
+- Local storage retains only a limited audit history and strips large uploaded file content. Preserve an independent backup before any deployment; full evidence retention needs the separate storage phase.
+- Authentication is still the existing development implementation. Client-side role checks are not a trusted authorization boundary.
+- Backup JSON export remains available. Restore is unavailable in the existing context and now reports that limitation before touching active data.
+- New engine submissions require an original imported DynPro source, valid JIS factor and explicit performance confirmation. Legacy sources without provenance must be re-imported for new submissions.
+- Approved legacy records remain unchanged in storage. Certificates with missing verification evidence or inconsistent results are displayed as reports requiring review, not official release certificates.
 
-1. Open the Firebase project referenced by `firebase-applet-config.json`.
-2. Create a Cloud Firestore database in Native mode.
-3. In Authentication > Sign-in method, enable Anonymous authentication.
-4. Publish the rules from `firestore.rules` using Firebase CLI or the Firebase Console.
-5. Add the published application domain to Authentication > Settings > Authorized domains.
-6. Run `npm run lint` and `npm run build` before deployment.
+## Local development and verification
 
-The included rules are intentionally limited to the `kra-development` workspace but still allow every authenticated anonymous session to read and write development data. Do not use these rules for production.
-
-## Local development
+Use Node.js 22.13+ (tested with Node 24) and npm:
 
 ```bash
-npm install
+npm ci
+npm run lint
+npm test
+npm run build
 npm run dev
 ```
 
-## Production readiness still required
+`npm run lint` runs TypeScript, including React declarations. `npm test` exercises evaluation, invalid imports, provenance, JIS calculations, workflow eligibility and certificate HTML rendering. It does not replace testing with actual DynPro reports and the deployed application's browser environment.
 
-- Replace anonymous authentication and local application passwords with managed employee authentication.
-- Enforce ADMIN, QC_TESTER, and SUPERVISOR authorization in Firestore rules or trusted backend code.
-- Remove demonstration credentials and sample identities.
-- Configure monitoring, retention, and a formal backup policy.
+The original `bun.lock` is retained for historical compatibility; the new `package-lock.json` is authoritative for the tested npm installation.
+
+## DynPro imports
+
+PDF extraction requires a text-based PDF. Scanned PDFs are rejected. The PDF worker is bundled locally with Vite instead of loaded from an external CDN.
+
+Recognized numeric row layouts are:
+
+```text
+RPM Power Torque
+1200 500 300
+1500 600 280
+1900 700 260
+```
+
+or:
+
+```text
+LineNumber RPM Power Torque
+4 1200 500 300
+5 1500 600 280
+6 1900 700 260
+```
+
+Comma, semicolon, tab or space delimiters and decimal-point numeric values are supported. At least three distinct valid LOAD RPMs are required. Unsupported numeric rows reject the import; the parser does not guess additional column layouts or create fallback measurements. Additional actual report formats require explicit column mapping and fixture testing.
+
+Existing LOAD classification and nearest-rated-RPM selection are retained; per-product maximum rated RPM deviation and engineering validation remain follow-up work. The JIS factor is entered by QC, not calculated from ambient measurements.
+
+## Demonstration data
+
+Production builds hide sample/preset actions. For local development only, `VITE_ENABLE_DEMO=true` enables them; any record using demo data is marked and blocked from submission and certification. Initial sample records are retained without migration or deletion.
+
+## Production work still required
+
+Managed employee authentication, trusted authorization rules/backend validation, Firestore synchronization, original-file object storage, atomic multi-user numbering, safe migration, durable audit history and full backup/restore need separate implementation and deployment verification. Do not treat this phase as production certification of the application.
