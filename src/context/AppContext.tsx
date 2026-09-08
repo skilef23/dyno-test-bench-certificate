@@ -19,7 +19,8 @@ import {
   INITIAL_TEST_RECORDS,
   INITIAL_AUDIT_LOGS,
 } from '../data/initialData';
-import { calculateOverallResults } from '../utils/evaluation';
+import { calculateOverallResults, normalizeResults } from '../utils/evaluation';
+import { approvalErrors, canEditTest, canDeleteTest, submissionErrors } from '../utils/testWorkflow';
 import {
   STORAGE_KEYS,
   purgeLegacyStorageKeys,
@@ -56,7 +57,7 @@ interface AppContextType {
     updates: Partial<TestRecord>,
     signature?: string,
     isSubmit?: boolean
-  ) => void;
+  ) => TestRecord;
   deleteTestRecord: (id: string) => void;
   approveTestRecord: (
     id: string,
@@ -157,17 +158,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      // Trim large extracted text preview
-      if (cleaned.fileInfo?.extractedTextPreview && cleaned.fileInfo.extractedTextPreview.length > 300) {
-        cleaned = {
-          ...cleaned,
-          fileInfo: {
-            ...cleaned.fileInfo,
-            extractedTextPreview: cleaned.fileInfo.extractedTextPreview.slice(0, 300) + '...',
-          },
-        };
-      }
-
       return cleaned;
     });
 
@@ -188,7 +178,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const currentUser = useMemo(() => {
     if (!currentUserId) return null;
-    return users.find((u) => u.id === currentUserId) || null;
+    return users.find((u) => u.id === currentUserId && u.active) || null;
   }, [users, currentUserId]);
 
   const isAuthenticated = currentUser !== null;
@@ -344,317 +334,108 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [testRecords]);
 
-  // Create new test record (QC TESTER ONLY)
+  const ensureQc = () => {
+    if (!currentUser?.active || currentUser.role !== 'QC_TESTER') throw new Error('An active QC Tester is required.');
+    return currentUser;
+  };
+
+  const ensureSubmission = (record: Partial<TestRecord>) => {
+    const errors = submissionErrors(record);
+    const product = products.find(p => p.id === record.productId);
+    if (!product || product.status !== 'ACTIVE') errors.push('Select an active master product.');
+    if (!testBenchesForValidation(record.testBenchCode)) errors.push('Select a valid test bench.');
+    if (errors.length) throw new Error(errors.join('\n'));
+  };
+  const testBenchesForValidation = (code?: string) => STANDARD_TEST_BENCHES.some(bench => bench.code === code);
+
   const createTestRecord = (
     data: Omit<TestRecord, 'id' | 'createdAt' | 'updatedAt' | 'approvals'>,
     signature?: string,
     isSubmit = false
   ): TestRecord => {
-    if (!currentUser || currentUser.role !== 'QC_TESTER') {
-      alert('Access Denied: Dyno Test creation and data input are strictly restricted to QC Testers.');
-      throw new Error('Access Denied: QC Tester permission required.');
-    }
-
-    const newId = `test-rec-${Date.now()}`;
-    const certNo = data.certificateNumber || generateNextCertNumber();
-    const evaluation = calculateOverallResults(data.results);
-
+    const user = ensureQc();
+    if (!data.jobOrder.trim() || !data.serialNumber.trim()) throw new Error('Job Order and Serial Number are required.');
+    const results = normalizeResults(data.results);
+    const evaluation = calculateOverallResults(results);
     const now = new Date().toISOString();
-    const approvals: ApprovalRecord[] = [];
-
-    const activeUser = currentUser;
-
-    if (isSubmit && (signature || activeUser.signature)) {
-      approvals.push({
-        id: `app-${Date.now()}`,
-        type: 'QC_SUBMIT',
-        userId: activeUser.id,
-        userName: activeUser.name,
-        employeeId: activeUser.employeeId,
-        userRole: activeUser.role,
-        signature: signature || activeUser.signature || '',
-        timestamp: now,
-        notes: 'Submitted for supervisor verification.',
-      });
-    }
-
-    const newRecord: TestRecord = {
-      ...data,
-      id: newId,
-      certificateNumber: certNo,
+    const testerSignature = signature || user.signature || '';
+    const certNo = data.certificateNumber && !testRecords.some(r => r.certificateNumber === data.certificateNumber) ? data.certificateNumber : generateNextCertNumber();
+    const record: TestRecord = {
+      ...data, ...evaluation, results,
+      id: `test-rec-${crypto.randomUUID()}`, certificateNumber: certNo,
       workflowStatus: isSubmit ? 'WAITING_APPROVAL' : 'DRAFT',
-      overallResult: evaluation.overallResult,
-      totalParameters: evaluation.totalParameters,
-      passedParameters: evaluation.passedParameters,
-      failedParameters: evaluation.failedParameters,
-      testerId: activeUser.id,
-      testerName: activeUser.name,
-      testerEmployeeId: activeUser.employeeId,
-      testerSignature: signature || activeUser.signature,
-      testedAt: now,
-      approvals,
-      createdAt: now,
-      updatedAt: now,
+      testerId: user.id, testerName: user.name, testerEmployeeId: user.employeeId,
+      testerSignature, testedAt: now, createdAt: now, updatedAt: now,
+      approvals: isSubmit ? [{id: crypto.randomUUID(), type: 'QC_SUBMIT', userId: user.id, userName: user.name, employeeId: user.employeeId, userRole: user.role, signature: testerSignature, timestamp: now}] : [],
     };
-
-    setTestRecords((prev) => [newRecord, ...prev]);
-
-    logAudit(
-      isSubmit ? 'TEST_SUBMITTED' : 'TEST_SAVED_DRAFT',
-      isSubmit
-        ? `Submitted Dyno Test Job Order ${newRecord.jobOrder} (Model: ${newRecord.typeModel}, S/N: ${newRecord.serialNumber}) for Supervisor approval.`
-        : `Saved draft Dyno Test Job Order ${newRecord.jobOrder} (Model: ${newRecord.typeModel})`,
-      newRecord.jobOrder,
-      isSubmit ? 'DRAFT' : '-',
-      isSubmit ? 'WAITING_APPROVAL' : 'DRAFT'
-    );
-
-    return newRecord;
+    if (isSubmit) ensureSubmission(record);
+    setTestRecords(prev => [record, ...prev]);
+    logAudit(isSubmit ? 'TEST_SUBMITTED' : 'TEST_SAVED_DRAFT', `Saved Dyno Test Job Order ${record.jobOrder}`, record.id, '-', record.workflowStatus);
+    return record;
   };
 
-  // Update test record (QC TESTER ONLY, and only when DRAFT or REJECTED)
-  const updateTestRecord = (
-    id: string,
-    updates: Partial<TestRecord>,
-    signature?: string,
-    isSubmit = false
-  ) => {
-    if (!currentUser || currentUser.role !== 'QC_TESTER') {
-      alert('Access Denied: Modifying and resubmitting QC Dyno Test results is strictly restricted to QC Testers.');
-      return;
-    }
-
-    const activeUser = currentUser;
-
-    setTestRecords((prev) =>
-      prev.map((rec) => {
-        if (rec.id !== id) return rec;
-
-        // Prevent modification if already approved or waiting approval (locked)
-        if (rec.workflowStatus === 'APPROVED') {
-          alert('Approved test records are locked and immutable.');
-          return rec;
-        }
-
-        if (rec.workflowStatus === 'WAITING_APPROVAL' && !isSubmit) {
-          alert('Submitted test records are locked pending Supervisor review.');
-          return rec;
-        }
-
-        const now = new Date().toISOString();
-        const mergedResults = updates.results || rec.results;
-        const evaluation = calculateOverallResults(mergedResults);
-
-        const newApprovals = [...rec.approvals];
-        if (isSubmit && (signature || activeUser.signature)) {
-          newApprovals.push({
-            id: `app-${Date.now()}`,
-            type: 'QC_SUBMIT',
-            userId: activeUser.id,
-            userName: activeUser.name,
-            employeeId: activeUser.employeeId,
-            userRole: activeUser.role,
-            signature: signature || activeUser.signature || '',
-            timestamp: now,
-            notes: 'Re-submitted for supervisor verification.',
-          });
-        }
-
-        const updated: TestRecord = {
-          ...rec,
-          ...updates,
-          workflowStatus: isSubmit
-            ? 'WAITING_APPROVAL'
-            : updates.workflowStatus || rec.workflowStatus,
-          overallResult: evaluation.overallResult,
-          totalParameters: evaluation.totalParameters,
-          passedParameters: evaluation.passedParameters,
-          failedParameters: evaluation.failedParameters,
-          testerSignature: signature || updates.testerSignature || rec.testerSignature,
-          approvals: newApprovals,
-          updatedAt: now,
-        };
-
-        logAudit(
-          isSubmit ? 'TEST_RESUBMITTED' : 'TEST_UPDATED',
-          isSubmit
-            ? `Re-submitted Dyno Test Job Order ${updated.jobOrder} for Supervisor approval.`
-            : `Updated Dyno Test Job Order ${updated.jobOrder}`,
-          updated.jobOrder,
-          rec.workflowStatus,
-          updated.workflowStatus
-        );
-
-        return updated;
-      })
-    );
+  const updateTestRecord = (id: string, updates: Partial<TestRecord>, signature?: string, isSubmit = false): TestRecord => {
+    const user = ensureQc();
+    const previous = testRecords.find(record => record.id === id);
+    if (!previous || !canEditTest(previous, user)) throw new Error('Only Draft or Rejected tests can be edited or resubmitted.');
+    const results = normalizeResults(updates.results ?? previous.results);
+    const now = new Date().toISOString();
+    const testerSignature = signature || updates.testerSignature || previous.testerSignature || '';
+    const record: TestRecord = {
+      ...previous, ...updates, ...calculateOverallResults(results), results,
+      id: previous.id, certificateNumber: previous.certificateNumber, createdAt: previous.createdAt,
+      workflowStatus: isSubmit ? 'WAITING_APPROVAL' : 'DRAFT', updatedAt: now,
+      testerId: user.id, testerName: user.name, testerEmployeeId: user.employeeId, testerSignature,
+      supervisorId: undefined, supervisorName: undefined, supervisorEmployeeId: undefined, supervisorSignature: undefined, approvedAt: undefined,
+      approvals: [...previous.approvals, ...(isSubmit ? [{id: crypto.randomUUID(), type: 'QC_SUBMIT' as const, userId: user.id, userName: user.name, employeeId: user.employeeId, userRole: user.role, signature: testerSignature, timestamp: now}] : [])],
+    };
+    if (isSubmit) ensureSubmission(record);
+    setTestRecords(prev => prev.map(item => item.id === id && canEditTest(item, user) ? record : item));
+    logAudit(isSubmit ? 'TEST_RESUBMITTED' : 'TEST_UPDATED', `Updated Dyno Test Job Order ${record.jobOrder}`, id, previous.workflowStatus, record.workflowStatus);
+    return record;
   };
 
-  // Delete test record (DRAFT only, ADMIN or original QC)
   const deleteTestRecord = (id: string) => {
-    const target = testRecords.find((r) => r.id === id);
-    if (!target) return;
-    if (target.workflowStatus === 'APPROVED') {
-      alert('Approved quality test certificates cannot be deleted from the system.');
+    const record = testRecords.find(item => item.id === id);
+    if (!record || !canDeleteTest(record, currentUser)) {
+      alert('Only an Admin or the original QC Tester can delete a Draft. Submitted and approved records are locked.');
       return;
     }
-    if (currentUser?.role === 'SUPERVISOR') {
-      alert('Access Denied: Supervisors cannot delete test records.');
-      return;
-    }
-
-    setTestRecords((prev) => prev.filter((r) => r.id !== id));
-    logAudit(
-      'TEST_DELETED',
-      `Deleted Dyno Test record ${target.certificateNumber} (Job Order: ${target.jobOrder})`,
-      target.jobOrder,
-      target.workflowStatus,
-      'DELETED'
-    );
+    setTestRecords(prev => prev.filter(item => item.id !== id || !canDeleteTest(item, currentUser)));
+    logAudit('TEST_DELETED', `Deleted Draft Job Order ${record.jobOrder}`, id, 'DRAFT', 'DELETED');
   };
 
-  // Supervisor Approve (SUPERVISOR ONLY - STRICTLY NO ADMIN APPROVAL & NO SELF-APPROVAL)
-  const approveTestRecord = (
-    id: string,
-    approvalNotes?: string,
-    signature?: string
-  ): { success: boolean; message?: string } => {
-    const record = testRecords.find((r) => r.id === id);
-    if (!record) return { success: false, message: 'Test record not found' };
-
-    // 1. Strict Supervisor Role Check
-    if (!currentUser || currentUser.role !== 'SUPERVISOR') {
-      return {
-        success: false,
-        message: 'Access Denied: Supervisor permission required. Administrators and QC Testers are not authorized to approve test certificates.',
-      };
-    }
-
-    // 2. Strict Self-Approval Prevention Check
-    const isSameTester =
-      record.testerId === currentUser.id ||
-      record.testerEmployeeId === currentUser.employeeId ||
-      (record.testerName && record.testerName.trim().toLowerCase() === currentUser.name.trim().toLowerCase());
-
-    if (isSameTester) {
-      return {
-        success: false,
-        message: 'Self-approval is not allowed. The approval must be performed by a different authorized Supervisor.',
-      };
-    }
-
-    const spvSignature = signature || currentUser.signature;
-    if (!spvSignature) {
-      return { success: false, message: 'Supervisor signature is required for official approval.' };
-    }
-
+  const approveTestRecord = (id: string, approvalNotes?: string, signature?: string): {success: boolean; message?: string} => {
+    const record = testRecords.find(item => item.id === id);
+    if (!record) return {success: false, message: 'Test record not found.'};
+    const spvSignature = signature || currentUser?.signature;
+    const errors = approvalErrors(record, currentUser, spvSignature);
+    if (errors.length) return {success: false, message: errors.join('\n')};
+    const user = currentUser!;
     const now = new Date().toISOString();
-    const newApproval: ApprovalRecord = {
-      id: `app-spv-${Date.now()}`,
-      type: 'SUPERVISOR_APPROVE',
-      userId: currentUser.id,
-      userName: currentUser.name,
-      employeeId: currentUser.employeeId,
-      userRole: 'SUPERVISOR',
-      signature: spvSignature,
-      timestamp: now,
-      notes: approvalNotes || 'Product quality verified and approved per KRA standards.',
-    };
-
-    setTestRecords((prev) =>
-      prev.map((r) => {
-        if (r.id !== id) return r;
-        return {
-          ...r,
-          workflowStatus: 'APPROVED',
-          supervisorId: currentUser.id,
-          supervisorName: currentUser.name,
-          supervisorEmployeeId: currentUser.employeeId,
-          supervisorSignature: spvSignature,
-          approvedAt: now,
-          approvals: [...r.approvals, newApproval],
-          updatedAt: now,
-        };
-      })
-    );
-
-    logAudit(
-      'TEST_APPROVED',
-      `Approved Dyno Test Job Order ${record.jobOrder} (Model: ${record.typeModel}) and issued Quality Certificate.`,
-      record.jobOrder,
-      'WAITING_APPROVAL',
-      'APPROVED'
-    );
-
-    return { success: true };
+    const approval: ApprovalRecord = {id: crypto.randomUUID(), type: 'SUPERVISOR_APPROVE', userId: user.id, userName: user.name, employeeId: user.employeeId, userRole: user.role, signature: spvSignature!, timestamp: now, notes: approvalNotes};
+    setTestRecords(prev => prev.map(item => {
+      if (item.id !== id || approvalErrors(item, user, spvSignature).length) return item;
+      const results = normalizeResults(item.results);
+      return {...item, ...calculateOverallResults(results), results, workflowStatus: 'APPROVED', supervisorId: user.id, supervisorName: user.name, supervisorEmployeeId: user.employeeId, supervisorSignature: spvSignature, approvedAt: now, updatedAt: now, approvals: [...item.approvals, approval]};
+    }));
+    logAudit('TEST_APPROVED', `Approved Dyno Test Job Order ${record.jobOrder}`, id, 'WAITING_APPROVAL', 'APPROVED');
+    return {success: true};
   };
 
-  // Supervisor Reject (SUPERVISOR ONLY - STRICTLY NO ADMIN REJECT)
-  const rejectTestRecord = (
-    id: string,
-    reason: string,
-    signature?: string
-  ): { success: boolean; message?: string } => {
-    if (!reason || reason.trim().length === 0) {
-      return { success: false, message: 'Rejection reason is mandatory.' };
-    }
-
-    const record = testRecords.find((r) => r.id === id);
-    if (!record) return { success: false, message: 'Test record not found' };
-
-    // 1. Strict Supervisor Role Check
-    if (!currentUser || currentUser.role !== 'SUPERVISOR') {
-      return {
-        success: false,
-        message: 'Access Denied: Supervisor permission required. Administrators and QC Testers are not authorized to reject test records.',
-      };
-    }
-
-    const spvSignature = signature || currentUser.signature;
+  const rejectTestRecord = (id: string, reason: string, signature?: string): {success: boolean; message?: string} => {
+    const record = testRecords.find(item => item.id === id);
+    if (!currentUser?.active || currentUser.role !== 'SUPERVISOR') return {success: false, message: 'An active Supervisor is required.'};
+    if (!record || record.workflowStatus !== 'WAITING_APPROVAL') return {success: false, message: 'Only records waiting for approval can be rejected.'};
+    if (!reason.trim()) return {success: false, message: 'Rejection reason is mandatory.'};
+    const user = currentUser;
     const now = new Date().toISOString();
-    const newApproval: ApprovalRecord = {
-      id: `app-spv-rej-${Date.now()}`,
-      type: 'SUPERVISOR_REJECT',
-      userId: currentUser.id,
-      userName: currentUser.name,
-      employeeId: currentUser.employeeId,
-      userRole: 'SUPERVISOR',
-      signature: spvSignature || '',
-      timestamp: now,
-      rejectionReason: reason,
-      notes: reason,
-    };
-
-    setTestRecords((prev) =>
-      prev.map((r) => {
-        if (r.id !== id) return r;
-        return {
-          ...r,
-          workflowStatus: 'REJECTED',
-          supervisorId: currentUser.id,
-          supervisorName: currentUser.name,
-          supervisorEmployeeId: currentUser.employeeId,
-          supervisorSignature: spvSignature,
-          approvedAt: now,
-          rejectionReason: reason,
-          approvals: [...r.approvals, newApproval],
-          updatedAt: now,
-        };
-      })
-    );
-
-    logAudit(
-      'TEST_REJECTED',
-      `Rejected Dyno Test Job Order ${record.jobOrder}. Reason: ${reason}`,
-      record.jobOrder,
-      'WAITING_APPROVAL',
-      'REJECTED'
-    );
-
-    return { success: true };
+    const approval: ApprovalRecord = {id: crypto.randomUUID(), type: 'SUPERVISOR_REJECT', userId: user.id, userName: user.name, employeeId: user.employeeId, userRole: user.role, signature: signature || user.signature || '', timestamp: now, rejectionReason: reason.trim(), notes: reason.trim()};
+    setTestRecords(prev => prev.map(item => item.id === id && item.workflowStatus === 'WAITING_APPROVAL' ? {...item, workflowStatus: 'REJECTED', rejectionReason: reason.trim(), updatedAt: now, approvals: [...item.approvals, approval]} : item));
+    logAudit('TEST_REJECTED', `Rejected Dyno Test Job Order ${record.jobOrder}: ${reason.trim()}`, id, 'WAITING_APPROVAL', 'REJECTED');
+    return {success: true};
   };
 
-  // Master Product CRUD (ADMIN only)
   const saveProduct = (prod: Partial<Product>, bumpRevision = false) => {
     if (currentUser?.role !== 'ADMIN') {
       alert('Access Denied – Administrator permission required.');

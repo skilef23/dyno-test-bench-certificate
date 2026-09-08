@@ -1,3 +1,5 @@
+import { isOfficialCertificate } from '../utils/testWorkflow';
+import { calculateOverallResults } from '../utils/evaluation';
 import React, { useState } from 'react';
 import {
   Download,
@@ -36,10 +38,23 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
 
   const isApproved = record.workflowStatus === 'APPROVED';
   const isPass = record.overallResult === 'PASS';
+  const isOfficial = isOfficialCertificate(record);
+  const needsReview = isApproved && !isOfficial;
+  const resultLabel = needsReview && record.overallResult === 'PASS' ? 'VERIFICATION REQUIRED' : record.overallResult === 'PENDING' ? 'PENDING (BELUM LENGKAP)' : isOfficial ? 'PASSED (LULUS)' : isPass ? 'PASS — BELUM DISAHKAN' : 'FAILED (TIDAK LULUS)';
+  const conclusion = isOfficial
+    ? 'Produk telah diuji dan hasilnya disahkan Supervisor. Produk DINYATAKAN LULUS sesuai standar pengujian yang tercantum.'
+    : needsReview && record.overallResult === 'PASS'
+    ? 'Record lama memerlukan verifikasi ulang terhadap sumber data, kelengkapan, atau hasil evaluasi. Status tersimpan tidak diubah. Laporan ini bukan sertifikat kelulusan resmi.'
+    : record.overallResult === 'PENDING'
+    ? 'Pengujian belum lengkap. Hasil PENDING dan produk belum dinyatakan lulus. Laporan ini bukan sertifikat kelulusan resmi.'
+    : isPass
+    ? 'Hasil pengukuran berstatus PASS, tetapi belum disahkan untuk penerbitan sertifikat kelulusan resmi.'
+    : 'Produk TIDAK LULUS berdasarkan hasil pengujian. Lakukan review dan tindakan korektif. Laporan ini bukan sertifikat kelulusan resmi.';
+  const watermark = needsReview ? 'VERIFICATION REQUIRED' : `${record.workflowStatus.replaceAll('_', ' ')} — ${record.overallResult}`;
 
   const cleanModel = (record.typeModel || 'MODEL').replace(/[^a-zA-Z0-9-_]/g, '_');
   const cleanSerial = (record.serialNumber || 'SN').replace(/[^a-zA-Z0-9-_]/g, '_');
-  const filename = `${record.certificateNumber || 'KRA-DYNO-CERT'}_${cleanModel}_${cleanSerial}.pdf`;
+  const filename = `${isOfficial ? '' : 'REPORT_'}${record.certificateNumber || 'KRA-DYNO-CERT'}_${cleanModel}_${cleanSerial}.pdf`;
 
   const totalPages = includeGraph ? 2 : 1;
 
@@ -59,7 +74,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
       const success = await downloadCertificatePDF('kra-official-certificate-container', filename);
       if (success) {
         setDownloadSuccess(true);
-        if (isPass) {
+        if (isOfficial) {
           confetti({
             particleCount: 60,
             spread: 60,
@@ -90,7 +105,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-sm font-bold tracking-wide">
-                  Official A4 Certificate Preview & Export
+                  {isOfficial ? 'Official A4 Certificate Preview & Export' : 'A4 Test Report Preview & Export'}
                 </h3>
                 <span className="bg-emerald-500/20 text-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
                   <Check className="w-3 h-3" /> A4 Safe Margin 15mm
@@ -192,6 +207,9 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
           </div>
         </div>
 
+        {!isOfficial && <div role="status" className="px-4 py-2 text-xs text-amber-900 bg-amber-50 print:hidden">
+          {conclusion} {calculateOverallResults(record.results).overallResult !== record.overallResult ? 'Hasil tersimpan berbeda dari evaluasi ulang; review diperlukan.' : ''}
+        </div>}
         {/* Status Alerts */}
         {downloadSuccess && (
           <div className="bg-emerald-600 text-white text-xs px-4 py-2 flex items-center justify-between print:hidden">
@@ -237,20 +255,9 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                 fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
               }}
             >
-              {/* Page Background Watermark for NON-APPROVED or FAIL */}
-              {!isApproved && (
+              {!isOfficial && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 opacity-10 rotate-[-30deg]">
-                  <span className="text-6xl sm:text-7xl font-black uppercase border-8 border-amber-600 text-amber-800 px-8 py-2 rounded-2xl tracking-widest">
-                    {record.workflowStatus.replace('_', ' ')}
-                  </span>
-                </div>
-              )}
-
-              {isApproved && !isPass && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 opacity-15 rotate-[-30deg]">
-                  <span className="text-6xl sm:text-7xl font-black uppercase border-8 border-rose-600 text-rose-800 px-8 py-2 rounded-2xl tracking-widest">
-                    FAILED INSPECTION
-                  </span>
+                  <span className="text-4xl font-black uppercase border-4 border-amber-600 text-amber-800 px-4 py-2 text-center">{watermark}</span>
                 </div>
               )}
 
@@ -299,7 +306,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                       SERTIFIKAT UJI KUALITAS PRODUK
                     </h2>
                     <h3 className="text-[10px] font-bold tracking-widest text-slate-600 uppercase">
-                      PRODUCT QUALITY TEST CERTIFICATE (DYNO TEST BENCH)
+                      {isOfficial ? 'PRODUCT QUALITY TEST CERTIFICATE (DYNO TEST BENCH)' : 'DYNO TEST BENCH REPORT — NOT A RELEASE CERTIFICATE'}
                     </h3>
                   </div>
                 </div>
@@ -393,7 +400,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                                 {item.unit || '-'}
                               </td>
                               <td className="py-1 px-2.5 font-mono border-r border-slate-200">
-                                {item.hasRhLh ? (
+                                {item.bankConfig === 'RH_LH' ? (
                                   <div className="flex gap-2">
                                     <span>
                                       RH: <strong className="text-slate-900">{item.actualRh ?? '-'}</strong>
@@ -442,7 +449,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                         2B. HASIL UJI KINERJA MESIN / ENGINE PERFORMANCE RESULTS
                       </span>
                       <span className="text-[9px] font-mono text-slate-300">
-                        JIS D 1005 Correction Factor: {record.jisFactor?.toFixed(3) || '1.000'}
+                        JIS D 1005 Correction Factor: {Number.isFinite(record.jisFactor) && record.jisFactor! > 0 ? record.jisFactor!.toFixed(3) : 'NOT PROVIDED'}
                       </span>
                     </div>
                     <div className="border border-t-0 border-slate-300 p-2.5 bg-slate-50/80 rounded-b space-y-1.5 text-[10.5px]">
@@ -518,13 +525,11 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                                 isPass ? 'bg-emerald-600 text-white border-emerald-700' : 'bg-rose-600 text-white border-rose-700'
                               }`}
                             >
-                              {isPass ? 'PASSED (LULUS)' : 'FAILED (TIDAK LULUS)'}
+                              {resultLabel}
                             </span>
                           </div>
                           <p className="text-[10px] text-slate-700 leading-relaxed">
-                            {isPass
-                              ? 'Produk ini telah melalui proses uji inspeksi dan verifikasi mutu Dyno Test Bench. Berdasarkan hasil pengujian seluruh parameter, produk DINYATAKAN LULUS dan memenuhi standar kualitas spesifikasi PT. Komatsu Remanufacturing Asia.'
-                              : 'Produk ini TIDAK LULUS berdasarkan hasil pengujian Dyno Test Bench. Silakan review parameter yang berstatus FAIL dan lakukan tindakan korektif / re-test.'}
+                            {conclusion}
                           </p>
                           {record.remarks && (
                             <div className="mt-1 text-[9px] text-slate-500">
@@ -609,6 +614,11 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                   fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
                 }}
               >
+                {!isOfficial && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 opacity-10 rotate-[-30deg]">
+                    <span className="text-4xl font-black uppercase border-4 border-amber-600 text-amber-800 px-4 py-2 text-center">{watermark}</span>
+                  </div>
+                )}
                 {/* Main Content of Page 2 */}
                 <div className="flex-1 flex flex-col">
                   {/* Page 2 Continuation Header */}
@@ -619,7 +629,7 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                       </div>
                       <div>
                         <h2 className="text-[11px] font-black text-blue-950 uppercase tracking-wide">
-                          PRODUCT QUALITY TEST CERTIFICATE — PERFORMANCE EVALUATION
+                          {isOfficial ? 'PRODUCT QUALITY TEST CERTIFICATE — PERFORMANCE EVALUATION' : 'TEST REPORT — PERFORMANCE EVALUATION'}
                         </h2>
                         <p className="text-[8.5px] text-slate-500">
                           PT Komatsu Remanufacturing Asia • Quality Assurance Department
@@ -682,13 +692,11 @@ export const CertificateView: React.FC<CertificateViewProps> = ({ record, onClos
                                 : 'bg-rose-600 text-white border-rose-700'
                             }`}
                           >
-                            {isPass ? 'PASSED (LULUS)' : 'FAILED (TIDAK LULUS)'}
+                            {resultLabel}
                           </span>
                         </div>
                         <p className="text-[10.5px] text-slate-700 leading-relaxed">
-                          {isPass
-                            ? 'Produk ini telah melalui proses uji inspeksi dan verifikasi mutu Dyno Test Bench. Berdasarkan hasil pengujian seluruh parameter, produk DINYATAKAN LULUS dan memenuhi standar kualitas spesifikasi PT. Komatsu Remanufacturing Asia.'
-                            : 'Produk ini TIDAK LULUS berdasarkan hasil pengujian Dyno Test Bench. Silakan review parameter yang berstatus FAIL dan lakukan tindakan korektif / re-test sebelum unit diserahkan ke proses selanjutnya.'}
+                          {conclusion}
                         </p>
                         {record.rejectionReason && (
                           <div className="mt-1.5 pt-1.5 border-t border-slate-200 text-[10px] text-rose-700">

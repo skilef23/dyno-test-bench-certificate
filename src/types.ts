@@ -61,6 +61,8 @@ export interface ProductTestParameter {
   maxValue?: number;
   targetValue?: number;
   tolerance?: number; // ± tolerance
+  textPassValues?: string[];
+  textFailValues?: string[];
   required: boolean;
   status: 'ACTIVE' | 'INACTIVE';
   sourceType?: 'LIBRARY' | 'CUSTOM';
@@ -125,6 +127,8 @@ export interface DynProFileInfo {
   fileSize: number;
   fileType: string;
   uploadedAt: string;
+  source?: 'PDF' | 'TEXT' | 'DEMO'; // Missing on legacy files: requires re-import
+  importedRows?: number;
   fileData?: string; // base64 or dataUrl to retain original uploaded DynPro PDF
 }
 
@@ -151,6 +155,11 @@ export interface TestResultItem {
   targetValue?: number;
   tolerance?: number;
   
+  // Undefined required on legacy records is treated as required.
+  required?: boolean;
+  textPassValues?: string[];
+  textFailValues?: string[];
+
   // Actual values input
   actualValue?: number | string;
   actualRh?: number;
@@ -231,6 +240,8 @@ export interface TestRecord {
   failedParameters: number;
   
   // DynPro Performance Test Data & Traceability
+  performanceConfirmed?: boolean;
+  isDemo?: boolean;
   jisFactor?: number; // Mandatory JIS Correction Factor entered by QC Tester
   dynProFile?: DynProFileInfo; // Retained original uploaded DynPro PDF
   performanceData?: DynProDataPoint[]; // Extracted & JIS corrected performance curves (RPM, Power, Torque)

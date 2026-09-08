@@ -1,3 +1,5 @@
+import { isTextSpec, normalizeResults, parseReading } from '../utils/evaluation';
+import { submissionErrors } from '../utils/testWorkflow';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   TestRecord,
@@ -73,6 +75,8 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   } = useApp();
 
   const isEditing = Boolean(initialRecord);
+  const demoMode = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO === 'true';
+  const [isDemo, setIsDemo] = useState(initialRecord?.isDemo ?? false);
 
   // Step wizard: 1 = Product Info, 2 = Performance Test, 3 = Review & Sign
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
@@ -80,11 +84,11 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   // Step 1: Product Information
   const [selectedProductId, setSelectedProductId] = useState<string>(() => {
     if (initialRecord?.productId) return initialRecord.productId;
-    return products[0]?.id || '';
+    return products.find(p => p.status === 'ACTIVE')?.id || '';
   });
 
   const selectedProduct = useMemo(() => {
-    return products.find((p) => p.id === selectedProductId) || products[0];
+    return products.find((p) => p.id === selectedProductId);
   }, [products, selectedProductId]);
 
   const [jobOrder, setJobOrder] = useState(initialRecord?.jobOrder || '');
@@ -102,22 +106,16 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   // JIS Factor (QC Tester enters manually; system does NOT calculate it)
   const [jisFactor, setJisFactor] = useState<number>(() => {
     if (initialRecord?.jisFactor !== undefined) return initialRecord.jisFactor;
-    return 1.015;
+    return Number.NaN;
   });
 
   // DynPro Upload & Performance Data
   const [dynProFile, setDynProFile] = useState<DynProFileInfo | undefined>(
     initialRecord?.dynProFile
   );
-  const [rawPerformanceData, setRawPerformanceData] = useState<
-    Array<{ rpm: number; rawPower: number; rawTorque: number }>
-  >(() => {
+  const [rawPerformanceData, setRawPerformanceData] = useState<DynProDataPoint[]>(() => {
     if (initialRecord?.performanceData && initialRecord.performanceData.length > 0) {
-      return initialRecord.performanceData.map((p) => ({
-        rpm: p.rpm,
-        rawPower: p.rawPower,
-        rawTorque: p.rawTorque,
-      }));
+      return initialRecord.performanceData.map(({correctedPower, correctedTorque, ...point}) => point);
     }
     return [];
   });
@@ -129,21 +127,23 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   const [showAuditCalculations, setShowAuditCalculations] = useState(false);
   const [performanceConfirmed, setPerformanceConfirmed] = useState(false);
 
+  const validJisFactor = Number.isFinite(jisFactor) && jisFactor > 0;
+
   // Calculate corrected performance data using JIS Factor
   const correctedPerformanceData = useMemo<DynProDataPoint[]>(() => {
-    if (!rawPerformanceData || rawPerformanceData.length === 0) return [];
+    if (!validJisFactor || !rawPerformanceData || rawPerformanceData.length === 0) return [];
     return applyJISFactorToDataset(rawPerformanceData, jisFactor);
   }, [rawPerformanceData, jisFactor]);
 
   // Predefined 9 Sampling Points closest to predefined RPM targets
   const samplingPoints = useMemo<PerformanceSamplingPoint[]>(() => {
-    return extractSamplingPoints(rawPerformanceData, jisFactor);
+    return validJisFactor ? extractSamplingPoints(rawPerformanceData, jisFactor) : [];
   }, [rawPerformanceData, jisFactor]);
 
   // Reset confirmation state when dataset or factor changes
   useEffect(() => {
     setPerformanceConfirmed(false);
-  }, [rawPerformanceData, jisFactor]);
+  }, [rawPerformanceData, jisFactor, dynProFile, selectedProductId, selectedProduct?.revision]);
 
   // Rated Power & Torque calculations based on closest measured RPM
   const ratedPowerResult = useMemo<RatedPointResult | undefined>(() => {
@@ -161,12 +161,12 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   // Step 2: Dynamic Test Results
   const [testResults, setTestResults] = useState<TestResultItem[]>(() => {
     if (initialRecord && initialRecord.results && initialRecord.results.length > 0) {
-      return initialRecord.results;
+      return normalizeResults(initialRecord.results);
     }
     // Generate initial result items from selected product's configured parameters
     const prod = products.find((p) => p.id === selectedProductId) || products[0];
     if (prod && prod.parameters) {
-      return prod.parameters.map((param) => ({
+      return prod.parameters.filter(param => param.status === 'ACTIVE').map((param) => ({
         parameterId: param.id,
         order: param.order,
         parameterName: param.name,
@@ -174,6 +174,9 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
         specText: param.specText,
         unit: param.unit,
         bankConfig: param.bankConfig,
+        required: param.required,
+        textPassValues: param.textPassValues,
+        textFailValues: param.textFailValues,
         minValue: param.minValue,
         maxValue: param.maxValue,
         targetValue: param.targetValue,
@@ -192,7 +195,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   // When selected product changes on a fresh form (step 1), reload test parameters
   useEffect(() => {
     if (!initialRecord && selectedProduct && selectedProduct.parameters) {
-      const generated: TestResultItem[] = selectedProduct.parameters.map((param) => ({
+      const generated: TestResultItem[] = selectedProduct.parameters.filter(param => param.status === 'ACTIVE').map((param) => ({
         parameterId: param.id,
         order: param.order,
         parameterName: param.name,
@@ -200,6 +203,9 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
         specText: param.specText,
         unit: param.unit,
         bankConfig: param.bankConfig,
+        required: param.required,
+        textPassValues: param.textPassValues,
+        textFailValues: param.textFailValues,
         minValue: param.minValue,
         maxValue: param.maxValue,
         targetValue: param.targetValue,
@@ -235,9 +241,10 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
     if (valStr.trim() === '') {
       target.actualValue = undefined;
     } else {
-      target.actualValue = isNaN(Number(valStr)) ? valStr : parseFloat(valStr);
+      target.actualValue = isTextSpec(target.specType) ? valStr : parseReading(valStr) ?? valStr;
     }
 
+    if (/^(power|torque)$/i.test(target.parameterName.trim())) setPerformanceConfirmed(false);
     const evaluated = evaluateItemStatus(target);
     target.status = evaluated.status;
     items[index] = target;
@@ -252,7 +259,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
     if (valStr.trim() === '') {
       target.actualRh = undefined;
     } else {
-      target.actualRh = parseFloat(valStr);
+      target.actualRh = parseReading(valStr);
     }
 
     const evaluated = evaluateItemStatus(target);
@@ -271,7 +278,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
     if (valStr.trim() === '') {
       target.actualLh = undefined;
     } else {
-      target.actualLh = parseFloat(valStr);
+      target.actualLh = parseReading(valStr);
     }
 
     const evaluated = evaluateItemStatus(target);
@@ -293,13 +300,8 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
     try {
       const parsed = await parseDynProFile(file, selectedProduct?.model);
       setDynProFile(parsed.fileInfo);
-      setRawPerformanceData(
-        parsed.data.map((dp) => ({
-          rpm: dp.rpm,
-          rawPower: dp.rawPower,
-          rawTorque: dp.rawTorque,
-        }))
-      );
+      setRawPerformanceData(parsed.data);
+      setPerformanceConfirmed(false);
     } catch (err: any) {
       setParseError(err?.message || 'Failed to extract performance data from file.');
     } finally {
@@ -312,11 +314,14 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
 
   // Quick Sample DynPro Loader
   const handleLoadSampleDynPro = () => {
+    if (!demoMode) return;
+    setIsDemo(true);
     const samplePoints = generateSampleDynProData(selectedProduct?.model);
 
     setRawPerformanceData(samplePoints);
     setDynProFile({
       fileName: `DynPro_${(selectedProduct?.model || 'KOMATSU').replace(/[^a-zA-Z0-9]/g, '_')}_TEST_REPORT.pdf`,
+      source: 'DEMO',
       fileSize: 245800,
       fileType: 'application/pdf',
       uploadedAt: new Date().toISOString(),
@@ -334,12 +339,12 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
   const handleApplyRatedPointsToTable = () => {
     const updated = testResults.map((item) => {
       const name = item.parameterName.toLowerCase();
-      if (name.includes('power') && ratedPowerResult) {
+      if (name.trim() === 'power' && ratedPowerResult) {
         const copy = { ...item, actualValue: ratedPowerResult.correctedHp };
         const evaluated = evaluateItemStatus(copy);
         return { ...copy, status: evaluated.status };
       }
-      if (name.includes('torque') && ratedTorqueResult) {
+      if (name.trim() === 'torque' && ratedTorqueResult) {
         const copy = { ...item, actualValue: ratedTorqueResult.correctedTorque };
         const evaluated = evaluateItemStatus(copy);
         return { ...copy, status: evaluated.status };
@@ -352,12 +357,22 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
 
   // Confirm Performance Data Action
   const handleConfirmPerformanceData = () => {
+    if (!validJisFactor || !correctedPerformanceData.length || !['PDF', 'TEXT'].includes(dynProFile?.source ?? '') || isDemo) {
+      setParseError('Upload an original report and enter a valid JIS factor. Demo or legacy data cannot be confirmed.');
+      return;
+    }
+    if ((selectedProduct?.ratedPowerRpm && !ratedPowerResult) || (selectedProduct?.ratedTorqueRpm && !ratedTorqueResult)) {
+      setParseError('Rated performance data is unavailable. Review the uploaded measurements.');
+      return;
+    }
     handleApplyRatedPointsToTable();
     setPerformanceConfirmed(true);
   };
 
   // Quick preset loader for demonstration / nominal readings
   const handleFillStandardReadings = () => {
+    if (!demoMode) return;
+    setIsDemo(true);
     if (!selectedProduct || !selectedProduct.parameters) return;
 
     // First load sample DynPro curve if empty
@@ -365,7 +380,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
       handleLoadSampleDynPro();
     }
 
-    const simulated = selectedProduct.parameters.map((param) => {
+    const simulated = selectedProduct.parameters.filter(param => param.status === 'ACTIVE').map((param) => {
       let actualVal: number | string | undefined;
       let actualRh: number | undefined;
       let actualLh: number | undefined;
@@ -409,6 +424,9 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
         specText: param.specText,
         unit: param.unit,
         bankConfig: param.bankConfig,
+        required: param.required,
+        textPassValues: param.textPassValues,
+        textFailValues: param.textFailValues,
         minValue: param.minValue,
         maxValue: param.maxValue,
         targetValue: param.targetValue,
@@ -446,134 +464,46 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
 
   // Validation before proceeding to step 3
   const handleProceedToStep3 = () => {
-    if (overallCalc.pendingParameters > 0) {
-      if (
-        !confirm(
-          `There are ${overallCalc.pendingParameters} parameters without readings. Proceed to review?`
-        )
-      ) {
-        return;
-      }
-    }
+    const errors = submissionErrors(buildRecordData(), {requireSignature: false});
+    if (errors.length) { alert(errors.join('\n')); return; }
     setCurrentStep(3);
   };
 
-  // Save Draft
-  const handleSaveDraft = () => {
-    if (!jobOrder.trim() || !serialNumber.trim()) {
-      alert('Please enter Job Order and Serial Number to save a draft.');
-      return;
+  const buildRecordData = () => ({
+    certificateNumber,
+    workflowStatus: 'DRAFT' as const,
+    productId: selectedProduct?.id,
+    productRevision: isEditing ? initialRecord?.productRevision : selectedProduct?.revision,
+    productType: selectedProduct?.productType,
+    productName: selectedProduct?.productName || '',
+    jobOrder: jobOrder.trim(), typeModel: selectedProduct?.model || '', serialNumber: serialNumber.trim(),
+    componentPartNumber: selectedProduct?.componentPartNumber || '', machineModel: selectedProduct?.machineModel || '',
+    testBenchCode: selectedBenchCode, testBenchName: testBenches.find(b => b.code === selectedBenchCode)?.name || '', testDate,
+    testerId: currentUser.id, testerName: currentUser.name, testerEmployeeId: currentUser.employeeId, testerSignature,
+    results: normalizeResults(testResults), ...overallCalc, remarks: submissionNotes,
+    jisFactor: validJisFactor ? jisFactor : undefined,
+    dynProFile, performanceData: validJisFactor ? correctedPerformanceData : rawPerformanceData, samplingPoints, ratedPowerResult, ratedTorqueResult,
+    performanceConfirmed, isDemo,
+  });
+
+  const saveRecord = (submit: boolean) => {
+    if (isParsingFile) { alert('Wait until file import finishes.'); return; }
+    const data = buildRecordData();
+    if (submit) {
+      const errors = submissionErrors(data);
+      if (errors.length) { alert(errors.join('\n')); return; }
     }
-
-    const benchObj = testBenches.find((b) => b.code === selectedBenchCode) || testBenches[0];
-
-    const recordData = {
-      certificateNumber,
-      workflowStatus: 'DRAFT' as const,
-      overallResult: overallCalc.overallResult,
-      productId: selectedProduct?.id,
-      productRevision: selectedProduct?.revision || 1,
-      productType: selectedProduct?.productType,
-      productName: selectedProduct?.productName || 'KOMATSU DIESEL ENGINE',
-      jobOrder: jobOrder.trim(),
-      typeModel: selectedProduct?.model || 'SAA12V140E-3',
-      serialNumber: serialNumber.trim(),
-      componentPartNumber: selectedProduct?.componentPartNumber || '',
-      machineModel: selectedProduct?.machineModel || '',
-      testBenchCode: selectedBenchCode,
-      testBenchName: benchObj?.name || 'Dyno Test Bench',
-      testDate,
-      testerId: currentUser.id,
-      testerName: currentUser.name,
-      testerEmployeeId: currentUser.employeeId,
-      testerSignature: testerSignature || currentUser.signature,
-      results: testResults,
-      totalParameters: overallCalc.totalParameters,
-      passedParameters: overallCalc.passedParameters,
-      failedParameters: overallCalc.failedParameters,
-      remarks: submissionNotes,
-      jisFactor,
-      dynProFile,
-      performanceData: correctedPerformanceData,
-      samplingPoints,
-      ratedPowerResult,
-      ratedTorqueResult,
-    };
-
-    if (isEditing && initialRecord) {
-      updateTestRecord(initialRecord.id, recordData, testerSignature, false);
-      onSuccess({
-        ...initialRecord,
-        ...recordData,
-        id: initialRecord.id,
-        createdAt: initialRecord.createdAt,
-        updatedAt: new Date().toISOString(),
-        approvals: initialRecord.approvals,
-      });
-    } else {
-      const created = createTestRecord(recordData, testerSignature, false);
-      onSuccess(created);
+    try {
+      const saved = isEditing && initialRecord
+        ? updateTestRecord(initialRecord.id, data, testerSignature, submit)
+        : createTestRecord(data, testerSignature, submit);
+      onSuccess(saved);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : 'Unable to save the test. Your form has been preserved.');
     }
   };
-
-  // Submit for Approval
-  const handleSubmitForApproval = () => {
-    if (!testerSignature) {
-      alert('QC Tester digital signature is mandatory to submit for Supervisor verification.');
-      setShowSignaturePad(true);
-      return;
-    }
-
-    const benchObj = testBenches.find((b) => b.code === selectedBenchCode) || testBenches[0];
-
-    const recordData = {
-      certificateNumber,
-      workflowStatus: 'WAITING_APPROVAL' as const,
-      overallResult: overallCalc.overallResult,
-      productId: selectedProduct?.id,
-      productRevision: selectedProduct?.revision || 1,
-      productType: selectedProduct?.productType,
-      productName: selectedProduct?.productName || 'KOMATSU DIESEL ENGINE',
-      jobOrder: jobOrder.trim(),
-      typeModel: selectedProduct?.model || 'SAA12V140E-3',
-      serialNumber: serialNumber.trim(),
-      componentPartNumber: selectedProduct?.componentPartNumber || '',
-      machineModel: selectedProduct?.machineModel || '',
-      testBenchCode: selectedBenchCode,
-      testBenchName: benchObj?.name || 'Dyno Test Bench',
-      testDate,
-      testerId: currentUser.id,
-      testerName: currentUser.name,
-      testerEmployeeId: currentUser.employeeId,
-      testerSignature,
-      results: testResults,
-      totalParameters: overallCalc.totalParameters,
-      passedParameters: overallCalc.passedParameters,
-      failedParameters: overallCalc.failedParameters,
-      remarks: submissionNotes,
-      jisFactor,
-      dynProFile,
-      performanceData: correctedPerformanceData,
-      samplingPoints,
-      ratedPowerResult,
-      ratedTorqueResult,
-    };
-
-    if (isEditing && initialRecord) {
-      updateTestRecord(initialRecord.id, recordData, testerSignature, true);
-      onSuccess({
-        ...initialRecord,
-        ...recordData,
-        id: initialRecord.id,
-        createdAt: initialRecord.createdAt,
-        updatedAt: new Date().toISOString(),
-        approvals: initialRecord.approvals,
-      });
-    } else {
-      const created = createTestRecord(recordData, testerSignature, true);
-      onSuccess(created);
-    }
-  };
+  const handleSaveDraft = () => saveRecord(false);
+  const handleSubmitForApproval = () => saveRecord(true);
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -698,7 +628,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
               >
                 {testBenches.map((b) => (
                   <option key={b.code} value={b.code}>
-                    {b.code} — {b.name} ({b.capacityHp} HP Capacity)
+                    {b.code} — {b.name} ({b.location})
                   </option>
                 ))}
               </select>
@@ -841,15 +771,15 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
             </div>
 
             <div className="flex items-center gap-2">
-              <button
+              {demoMode && <button
                 type="button"
                 onClick={handleFillStandardReadings}
                 className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs cursor-pointer"
                 title="Fill nominal test values"
               >
                 <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                <span>Auto-Fill Nominal Readings</span>
-              </button>
+                <span>Auto-Fill Nominal Readings (DEMO)</span>
+              </button>}
 
               <div className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 rounded-lg text-xs font-bold">
                 <span className="text-slate-600">Overall:</span>
@@ -891,10 +821,9 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                 <input
                   type="number"
                   step="0.001"
-                  min="0.5"
-                  max="2.0"
-                  value={jisFactor}
-                  onChange={(e) => setJisFactor(parseFloat(e.target.value) || 1.0)}
+                  min="0.001"
+                  value={Number.isFinite(jisFactor) ? jisFactor : ''}
+                  onChange={(e) => {setPerformanceConfirmed(false); setJisFactor(e.target.value === '' ? Number.NaN : Number(e.target.value));}}
                   className="w-20 px-2 py-0.5 bg-slate-950 border border-amber-400/60 rounded text-xs font-mono font-black text-amber-400 text-center focus:outline-none focus:ring-1 focus:ring-amber-400"
                 />
               </div>
@@ -927,7 +856,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                       </span>
                     </label>
 
-                    <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-center gap-2">
+                    {demoMode && <div className="mt-2 pt-2 border-t border-slate-800 flex items-center justify-center gap-2">
                       <button
                         type="button"
                         onClick={handleLoadSampleDynPro}
@@ -935,7 +864,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                       >
                         ⚡ Load Sample DynPro Report (Demo)
                       </button>
-                    </div>
+                    </div>}
                   </div>
                 ) : (
                   <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between">
@@ -955,7 +884,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
 
                     <div className="flex items-center gap-2">
                       <span className="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-900/60 text-emerald-300 border border-emerald-700">
-                        ✓ File Retained
+                        {dynProFile.source === 'DEMO' ? 'DEMO' : dynProFile.fileData ? 'Original loaded' : 'Original not available'}
                       </span>
                       <button
                         type="button"
@@ -969,6 +898,11 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                   </div>
                 )}
 
+                {(!validJisFactor || isDemo || (dynProFile && !dynProFile.source)) && (
+                  <p role="alert" className="text-[11px] text-amber-300">
+                    {isDemo ? 'DEMO — cannot submit. Create a new test with actual readings.' : !validJisFactor ? 'Enter a finite JIS factor greater than zero.' : 'Legacy source: re-upload the original report to verify performance data.'}
+                  </p>
+                )}
                 {parseError && (
                   <div className="p-2.5 bg-rose-950/60 border border-rose-800 text-rose-300 text-[11px] rounded-lg flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
@@ -1175,7 +1109,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                               {pt.rawTorque !== undefined ? `${pt.rawTorque} kgm` : '-'}
                             </td>
                             <td className="py-2.5 px-3 text-center font-mono font-bold text-amber-700">
-                              {jisFactor.toFixed(3)}
+                              {(validJisFactor ? jisFactor.toFixed(3) : '—')}
                             </td>
                           </>
                         )}
@@ -1310,7 +1244,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
                           </div>
                         ) : (
                           <input
-                            type={item.specType === 'STRING_MATCH' ? 'text' : 'number'}
+                            type={isTextSpec(item.specType) ? 'text' : 'number'}
                             step="any"
                             placeholder="Enter actual reading"
                             value={item.actualValue !== undefined ? item.actualValue : ''}
@@ -1448,7 +1382,7 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
             </div>
             <div>
               <span className="text-[10px] text-slate-400 block font-medium">JIS Factor Applied</span>
-              <span className="font-mono font-bold text-amber-900">{jisFactor.toFixed(3)}</span>
+              <span className="font-mono font-bold text-amber-900">{(validJisFactor ? jisFactor.toFixed(3) : '—')}</span>
             </div>
           </div>
 
@@ -1653,14 +1587,15 @@ export const DynoTestForm: React.FC<DynoTestFormProps> = ({
             <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
               <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
                 <SignaturePad
-                  title="QC Tester Digital Signature"
+                  userName={currentUser.name}
+                  employeeId={currentUser.employeeId}
                   initialSignature={testerSignature}
                   onSave={(sig) => {
                     setTesterSignature(sig);
                     setShowSignaturePad(false);
                   }}
-                  onCancel={() => setShowSignaturePad(false)}
                 />
+                <button type="button" onClick={() => setShowSignaturePad(false)} className="mt-3 text-sm text-slate-600">Cancel</button>
               </div>
             </div>
           )}

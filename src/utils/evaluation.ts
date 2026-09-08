@@ -1,173 +1,90 @@
-import { SpecType, PassFailStatus, TestResultItem } from '../types';
+import type { SpecType, PassFailStatus, TestResultItem } from '../types';
 
-export function evaluateValue(
-  val: number | undefined | null,
-  specType: SpecType | string,
-  minValue?: number,
-  maxValue?: number,
-  targetValue?: number,
-  tolerance?: number
-): PassFailStatus {
-  if (val === undefined || val === null || isNaN(val)) {
-    return 'PENDING';
-  }
+const normalized = (value: unknown) => String(value ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+const specName = (value: unknown) => normalized(value).replace(/-/g, '_');
+const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+export const isTextSpec = (value: unknown) => ['TEXT', 'QUALITATIVE'].includes(specName(value));
+export const hasReading = (value: unknown) => value !== undefined && value !== null && String(value).trim() !== '';
 
-  const normalizedSpec = String(specType).toUpperCase();
+export function parseReading(value: unknown): number | undefined {
+  if (finite(value)) return value;
+  if (typeof value !== 'string' || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim())) return undefined;
+  const number = Number(value);
+  return finite(number) ? number : undefined;
+}
 
-  switch (normalizedSpec) {
-    case 'MIN':
-    case 'MINIMUM':
-      if (minValue !== undefined) {
-        return val >= minValue ? 'PASS' : 'FAIL';
-      }
-      break;
-
-    case 'MAX':
-    case 'MAXIMUM':
-      if (maxValue !== undefined) {
-        return val <= maxValue ? 'PASS' : 'FAIL';
-      }
-      break;
-
+export function specificationError(item: Pick<TestResultItem, 'specType' | 'minValue' | 'maxValue' | 'targetValue' | 'tolerance'>): string | undefined {
+  switch (specName(item.specType)) {
+    case 'MIN': case 'MINIMUM':
+      return finite(item.minValue) ? undefined : 'Minimum is missing or invalid.';
+    case 'MAX': case 'MAXIMUM':
+      return finite(item.maxValue) ? undefined : 'Maximum is missing or invalid.';
     case 'MIN_MAX':
-    case 'MIN-MAX':
-      if (minValue !== undefined && maxValue !== undefined) {
-        return val >= minValue && val <= maxValue ? 'PASS' : 'FAIL';
-      } else if (minValue !== undefined) {
-        return val >= minValue ? 'PASS' : 'FAIL';
-      } else if (maxValue !== undefined) {
-        return val <= maxValue ? 'PASS' : 'FAIL';
-      }
-      break;
-
+      return finite(item.minValue) && finite(item.maxValue) && item.minValue <= item.maxValue ? undefined : 'A valid minimum and maximum are required.';
     case 'TARGET_TOLERANCE':
-    case 'TARGET-TOLERANCE':
-      if (targetValue !== undefined && tolerance !== undefined) {
-        const lowerBound = targetValue - tolerance;
-        const upperBound = targetValue + tolerance;
-        const roundedVal = Math.round(val * 1000) / 1000;
-        return roundedVal >= lowerBound - 0.0001 && roundedVal <= upperBound + 0.0001
-          ? 'PASS'
-          : 'FAIL';
-      }
-      break;
-
-    case 'TEXT':
-    case 'QUALITATIVE':
-      return 'PASS';
-  }
-
-  return 'PASS';
-}
-
-export function evaluateItemStatus(item: TestResultItem): {
-  status: PassFailStatus;
-  statusRh?: PassFailStatus;
-  statusLh?: PassFailStatus;
-} {
-  const isRhLh = item.bankConfig === 'RH_LH';
-
-  if (isRhLh) {
-    const statusRh = evaluateValue(
-      item.actualRh,
-      item.specType,
-      item.minValue,
-      item.maxValue,
-      item.targetValue,
-      item.tolerance
-    );
-
-    const statusLh = evaluateValue(
-      item.actualLh,
-      item.specType,
-      item.minValue,
-      item.maxValue,
-      item.targetValue,
-      item.tolerance
-    );
-
-    let status: PassFailStatus = 'PENDING';
-    if (statusRh === 'PENDING' || statusLh === 'PENDING') {
-      status = 'PENDING';
-    } else if (statusRh === 'PASS' && statusLh === 'PASS') {
-      status = 'PASS';
-    } else {
-      status = 'FAIL';
-    }
-
-    return { status, statusRh, statusLh };
-  } else {
-    const numVal =
-      typeof item.actualValue === 'number'
-        ? item.actualValue
-        : item.actualValue !== undefined && item.actualValue !== ''
-        ? parseFloat(String(item.actualValue))
-        : undefined;
-
-    const normalizedSpec = String(item.specType).toUpperCase();
-    if (normalizedSpec === 'TEXT' || normalizedSpec === 'QUALITATIVE') {
-      if (!item.actualValue || String(item.actualValue).trim() === '') {
-        return { status: 'PENDING' };
-      }
-      const valUpper = String(item.actualValue).toUpperCase();
-      const status: PassFailStatus =
-        valUpper.includes('FAIL') || valUpper.includes('NOK') || valUpper.includes('REJECT')
-          ? 'FAIL'
-          : 'PASS';
-      return { status };
-    }
-
-    const status = evaluateValue(
-      numVal,
-      item.specType,
-      item.minValue,
-      item.maxValue,
-      item.targetValue,
-      item.tolerance
-    );
-
-    return { status };
+      return finite(item.targetValue) && finite(item.tolerance) && item.tolerance >= 0 && finite(item.targetValue - item.tolerance) && finite(item.targetValue + item.tolerance) ? undefined : 'A finite target and non-negative tolerance are required.';
+    case 'TEXT': case 'QUALITATIVE': return undefined;
+    default: return 'Unsupported specification type.';
   }
 }
 
-export function calculateOverallResults(items: TestResultItem[]): {
-  overallResult: PassFailStatus;
-  totalParameters: number;
-  passedParameters: number;
-  failedParameters: number;
-  pendingParameters: number;
-} {
-  const totalParameters = items.length;
-  let passedParameters = 0;
-  let failedParameters = 0;
-  let pendingParameters = 0;
-
-  for (const item of items) {
-    if (item.status === 'FAIL') {
-      failedParameters++;
-    } else if (item.status === 'PASS') {
-      passedParameters++;
-    } else {
-      pendingParameters++;
+export function evaluateValue(val: number | undefined | null, specType: SpecType | string, minValue?: number, maxValue?: number, targetValue?: number, tolerance?: number): PassFailStatus {
+  if (!finite(val) || specificationError({specType: specType as SpecType, minValue, maxValue, targetValue, tolerance})) return 'PENDING';
+  switch (specName(specType)) {
+    case 'MIN': case 'MINIMUM': return val >= minValue! ? 'PASS' : 'FAIL';
+    case 'MAX': case 'MAXIMUM': return val <= maxValue! ? 'PASS' : 'FAIL';
+    case 'MIN_MAX': return val >= minValue! && val <= maxValue! ? 'PASS' : 'FAIL';
+    case 'TARGET_TOLERANCE': {
+      const epsilon = Number.EPSILON * Math.max(1, Math.abs(val), Math.abs(targetValue!), tolerance!) * 8;
+      return val >= targetValue! - tolerance! - epsilon && val <= targetValue! + tolerance! + epsilon ? 'PASS' : 'FAIL';
     }
+    default: return 'PENDING';
   }
+}
 
-  let overallResult: PassFailStatus = 'PENDING';
-  if (failedParameters > 0) {
-    overallResult = 'FAIL';
-  } else if (pendingParameters > 0) {
-    overallResult = 'PENDING';
-  } else if (totalParameters > 0 && passedParameters === totalParameters) {
-    overallResult = 'PASS';
-  }
-
-  return {
-    overallResult,
-    totalParameters,
-    passedParameters,
-    failedParameters,
-    pendingParameters,
+export function evaluateItemStatus(item: TestResultItem): {status: PassFailStatus; statusRh?: PassFailStatus; statusLh?: PassFailStatus} {
+  const evaluate = (value: unknown): PassFailStatus => {
+    if (isTextSpec(item.specType)) {
+      const valueText = normalized(value);
+      if (!valueText) return 'PENDING';
+      const pass = (item.textPassValues ?? ['GOOD', 'OK', 'PASS', 'NORMAL']).map(normalized);
+      const fail = (item.textFailValues ?? ['NOT GOOD', 'NG', 'NOK', 'FAIL', 'REJECT']).map(normalized);
+      if (pass.includes(valueText) && fail.includes(valueText)) return 'PENDING';
+      if (fail.includes(valueText)) return 'FAIL';
+      if (pass.includes(valueText)) return 'PASS';
+      return 'PENDING';
+    }
+    return evaluateValue(parseReading(value), item.specType, item.minValue, item.maxValue, item.targetValue, item.tolerance);
   };
+  if (item.bankConfig === 'RH_LH') {
+    const statusRh = evaluate(item.actualRh);
+    const statusLh = evaluate(item.actualLh);
+    const status = statusRh === 'FAIL' || statusLh === 'FAIL' ? 'FAIL' : statusRh === 'PASS' && statusLh === 'PASS' ? 'PASS' : 'PENDING';
+    return {status, statusRh, statusLh};
+  }
+  return {status: evaluate(item.actualValue)};
+}
+
+export function isOptionalBlank(item: TestResultItem): boolean {
+  return item.required === false && !(item.bankConfig === 'RH_LH' ? hasReading(item.actualRh) || hasReading(item.actualLh) : hasReading(item.actualValue));
+}
+
+export function normalizeResults(items: TestResultItem[]): TestResultItem[] {
+  return items.map(item => ({...item, ...evaluateItemStatus(item)}));
+}
+
+export function calculateOverallResults(items: TestResultItem[]) {
+  let passedParameters = 0, failedParameters = 0, pendingParameters = 0, skippedParameters = 0;
+  for (const item of items) {
+    if (specificationError(item)) { pendingParameters++; continue; }
+    if (isOptionalBlank(item)) { skippedParameters++; continue; }
+    const {status} = evaluateItemStatus(item);
+    if (status === 'PASS') passedParameters++;
+    else if (status === 'FAIL') failedParameters++;
+    else pendingParameters++;
+  }
+  const overallResult: PassFailStatus = failedParameters > 0 ? 'FAIL' : pendingParameters > 0 || passedParameters === 0 ? 'PENDING' : 'PASS';
+  return {overallResult, totalParameters: items.length, passedParameters, failedParameters, pendingParameters, skippedParameters};
 }
 
 export function formatSpecificationDisplay(item: {
